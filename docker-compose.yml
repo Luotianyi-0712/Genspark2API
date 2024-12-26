@@ -10,6 +10,12 @@ services:
     volumes:
       - ./data:/app/data
     environment:
+      # 接口路径
+      - API_PATH=
+      # 每次生成图片数
+      - IMAGE_COUNT=1
+      # 每张图片图片等待时间(共四张)
+      - IMAGE_WAIT_TIME=25000
       # 账号存放文件，一行一个
       - ACCOUNT_PATH=./data/account.txt
       # 运行模式
@@ -21,3 +27,13 @@ services:
       - ACCOUNT_MODE=1
       # 请求身份验证(非0模式可用)
       - API_KEY=sk-123456
+      # 代理配置
+      # 0: 不使用代理
+      # 1: 使用单代理
+      # 2: 使用代理池API(待开发)
+      - PROXY_MODE=0
+      # 代理地址
+      - PROXY_URL=socks5://username:password@host:port
+      # 代理api
+      - PROXY_API=
+

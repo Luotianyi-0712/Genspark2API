@@ -1,4 +1,4 @@
-const models = {
+export const models = {
   "o1-preview": "o1-preview",
   "o1-mini": "o1-preview",
   "claude-3-5-sonnet-20240620": "claude-3-5-sonnet",
@@ -9,7 +9,20 @@ const models = {
   "gpt-4o-mini": "gpt-4o-mini",
   "gemini-1.5-pro-latest": "gemini-1.5-pro",
   "gemini-1.5-flash-latest": "gemini-1.5-flash",
-  // "genspark": "genspark"
+  // "genspark": "genspark",
+  "dall-e-3": "dalle-3",
+  "flux": "flux",
+  "flux-speed": "flux-speed",
+  "flux-pro": "flux-pro/ultra",
+  "ideogram": "ideogram",
+  "recraft-v3": "recraft-v3"
 }
 
-export default models
+export const imageModels = {
+  "dall-e-3": "dalle-3",
+  "flux": "flux",
+  "flux-speed": "flux-speed",
+  "flux-pro": "flux-pro/ultra",
+  "ideogram": "ideogram",
+  "recraft-v3": "recraft-v3"
+}

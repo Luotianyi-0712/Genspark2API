@@ -2,10 +2,12 @@ import 'dotenv/config'
 import express from 'express'
 import bodyParser from 'body-parser'
 import crypto from 'crypto'
-import models from './models.js'
+import { models, imageModels } from './models.js'
 import AccountManager from './account.js'
 import config from './config.js'
 import fs from 'fs'
+import { HttpsProxyAgent } from 'https-proxy-agent'
+import { SocksProxyAgent } from 'socks-proxy-agent'
 
 const app = express()
 
@@ -17,32 +19,32 @@ app.use(bodyParser.text({ limit: '30mb' }))
 // ----------------------------------------------------------------------------------------------------
 // 初始化账号管理器
 let accountInitStatus = null
+const accounts = []
 
 if (config.account.mode == "1") {
-  accountInitStatus = AccountManager.init(config.account.accounts.split(',').filter(Boolean))
+  accounts.push(...config.account.accounts.split(',').filter(Boolean))
 } else if (config.account.mode == "2") {
-  const accounts = fs.readFileSync(config.account.path, 'utf-8').split('\n').filter(Boolean)
-  accountInitStatus = AccountManager.init(accounts.map(item => item.replace("\r", "").replace("\n", "")))
-} else {
-  accountInitStatus = false
+  const accountsFromFile = fs.readFileSync(config.account.path, 'utf-8').split('\n').filter(Boolean)
+  accounts.push(...accountsFromFile.map(item => item.replace("\r", "").replace("\n", "")))
+} else if (config.account.mode == "3") {
+  const accountsFromFile = fs.readFileSync(config.account.path, 'utf-8').split('\n').filter(Boolean)
+  accounts.push(...accountsFromFile.map(item => item.replace("\r", "").replace("\n", "")), ...config.account.accounts.split(',').filter(Boolean))
 }
 
+accountInitStatus = AccountManager.init(accounts)
 
+let proxyAgent = null
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// 代理配置
+if (config.proxy.mode == "1") {
+  if (config.proxy.url.includes("http")) {
+    // http://${proxyUsername}:${proxyPassword}@${proxyHost}:${proxyPort}
+    proxyAgent = new HttpsProxyAgent(config.proxy.url)
+  } else if (config.proxy.url.includes("socks5")) {
+    // socks5://${proxyUsername}:${proxyPassword}@${proxyHost}:${proxyPort}
+    proxyAgent = new SocksProxyAgent(config.proxy.url)
+  }
+}
 
 
 // ----------------------------------------------------------------------------------------------------
@@ -58,6 +60,156 @@ function isValidJSON(str) {
   } catch (e) {
     return false
   }
+}
+
+const sleep = async (ms) => {
+  return await new Promise(resolve => setTimeout(resolve, ms))
+}
+
+const getImageUrl = async (session_id, task_id) => {
+  const myHeaders = {
+    "Cookie": `session_id=${session_id}`,
+    "User-Agent": "Apifox/1.0.0 (https://apifox.com)",
+    "Content-Type": "application/json",
+    "Accept": "*/*",
+    "Host": "www.genspark.ai",
+    "Connection": "keep-alive"
+  }
+
+  const reqConfig = {
+    method: 'GET',
+    headers: myHeaders,
+    redirect: 'follow',
+    agent: proxyAgent
+  }
+  const startTime = Date.now()
+  while (true) {
+    try {
+      const url = await fetch(`https://www.genspark.ai/api/spark/image_generation_task_status?task_id=${task_id}`, reqConfig)
+      const urlContent = await url.json()
+      // console.log(3, urlContent.data.status)
+      if (urlContent.data.status == "SUCCESS") {
+        return urlContent.data.image_urls_nowatermark[0]
+      } else {
+        if (Date.now() - startTime > config.imageWaitTime || urlContent.data.status == "FAILURE") {
+          return null
+        }
+        await sleep(1000)
+      }
+    } catch (e) {
+      return null
+    }
+  }
+
+}
+
+const SendImageRequest = async (session_id, content, model = "dall-e-3", size = "1:1", style = "auto") => {
+  const myHeaders = {
+    "Cookie": `session_id=${session_id}`,
+    "User-Agent": "Apifox/1.0.0 (https://apifox.com)",
+    "Content-Type": "application/json",
+    "Accept": "*/*",
+    "Host": "www.genspark.ai",
+    "Connection": "keep-alive"
+  }
+
+  const sizeArray = ["auto", "9:16", "2:3", "3:4", "1:1", "4:3", "3:2", "16:9"]
+  /* 
+  auto: 自动
+  realistic_image: 写实
+  cartoon: 卡通
+  watercolor: 水彩
+  anime: 动漫
+  oil_painting: 油画
+  3d: 3D
+  minimalist: 极简
+  pop_art: 波普艺术
+  */
+  const styleArray = ["auto", "realistic_image", "cartoon", "watercolor", "anime", "oil_painting", "3d", "minimalist", "pop_art"]
+
+  size = sizeArray.includes(size) ? size : "auto"
+  style = styleArray.includes(style) ? style : "auto"
+
+  const body = JSON.stringify({
+    "type": "COPILOT_MOA_IMAGE",
+    "current_query_string": "type=COPILOT_MOA_IMAGE",
+    "messages": [
+      {
+        "role": "user",
+        "content": content
+      }
+    ],
+    "action_params": {},
+    "extra_data": {
+      "model_configs": [
+        {
+          "model": imageModels[model] || imageModels["dall-e-3"],
+          "aspect_ratio": size,
+          "use_personalized_models": false,
+          "fashion_profile_id": null,
+          "hd": false,
+          "reflection_enabled": false,
+          "style": style
+        }
+      ],
+      "imageModelMap": {},
+      "writingContent": null
+    }
+  })
+
+  const requestConfig = {
+    method: 'POST',
+    headers: myHeaders,
+    body: body,
+    redirect: 'follow',
+    agent: proxyAgent
+  }
+
+  const imageResponse = await fetch("https://www.genspark.ai/api/copilot/ask", requestConfig)
+
+  const imageStream = imageResponse.body.getReader()
+  const imageTaskIDs = []
+
+  while (true) {
+    const { done, value } = await imageStream.read()
+    if (done) {
+      break
+    }
+
+    const text = new TextDecoder().decode(value)
+    const textContent = [...text.matchAll(/data:.*"}/g)]
+    for (const item of textContent) {
+      if (!item[0] || !isValidJSON(item[0].replace("data: ", ''))) {
+        continue
+      }
+      let content = JSON.parse(item[0].replace("data: ", ''))
+      if (content.type != 'message_result') {
+        continue
+      }
+      const urlIDs = JSON.parse(content.content).generated_images.map(item => item.task_id)
+      imageTaskIDs.push(...urlIDs)
+    }
+  }
+
+  // console.log(1,imageTaskIDs)
+
+  if (imageTaskIDs.length > 0) {
+    const imageUrls = []
+    for (const item of imageTaskIDs) {
+      const url = await getImageUrl(session_id, item)
+      // console.log(2, url)
+      if (url) {
+        imageUrls.push(url)
+      }
+      if (imageUrls.length >= config.imageCount) {
+        break
+      }
+    }
+    return imageUrls
+  } else {
+    return []
+  }
+
 }
 
 const makeRequest = async (session_id, requestModel, messages) => {
@@ -91,7 +243,8 @@ const makeRequest = async (session_id, requestModel, messages) => {
       method: 'POST',
       headers: myHeaders,
       body: body,
-      redirect: 'follow'
+      redirect: 'follow',
+      agent: proxyAgent
     };
 
     return await fetch("https://www.genspark.ai/api/copilot/ask", requestConfig)
@@ -104,25 +257,24 @@ const makeRequest = async (session_id, requestModel, messages) => {
 const searchModel = async (session_id, messages) => {
   try {
 
+    const content = messages[messages.length - 1].content
+    const query = doubleEncode(content)
+
     const myHeaders = {
       "Cookie": `session_id=${session_id}`,
       "User-Agent": "Apifox/1.0.0 (https://apifox.com)",
       "Content-Type": "application/json",
       "Accept": "*/*",
       "Host": "www.genspark.ai",
-      "Connection": "keep-alive"
+      "Connection": "keep-alive",
     }
 
-    const content = messages[messages.length - 1].content
-    const query = doubleEncode(content)
-
-    const requestConfig = {
+    return await fetch(`https://www.genspark.ai/api/search/stream?query=${query}`, {
       method: 'POST',
       headers: myHeaders,
-      redirect: 'follow'
-    }
-
-    return await fetch(`https://www.genspark.ai/api/search/stream?query=${query}`, requestConfig)
+      redirect: 'follow',
+      agent: proxyAgent
+    })
 
   } catch (error) {
     console.log('error2', error)
@@ -144,7 +296,8 @@ const deleteMessage = async (project_id, session_id) => {
     const requestConfig = {
       method: 'GET',
       headers: myHeaders,
-      redirect: 'follow'
+      redirect: 'follow',
+      agent: proxyAgent
     }
 
     return await fetch(`https://www.genspark.ai/api/project/delete?project_id=${project_id}`, requestConfig)
@@ -154,8 +307,8 @@ const deleteMessage = async (project_id, session_id) => {
   }
 }
 
-app.post('/v1/chat/completions', async (req, res) => {
-  const { messages, stream = false, model = 'claude-3-5-sonnet' } = req.body
+app.post(config.apiPath + '/v1/chat/completions', async (req, res) => {
+  const { messages, stream = false, model = 'claude-3-5-sonnet-20241022' } = req.body
   const authHeader = req.headers['authorization'] || ''
   let session_id = authHeader.replace('Bearer ', '')
 
@@ -173,25 +326,120 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     let response = null
     let project_id = null
-    if (model === "genspark") {
-      response = await searchModel(session_id, messages)
-    } else {
-      response = await makeRequest(session_id, model, messages)
-    }
+    const messageId = crypto.randomUUID()
 
     if (stream === "true" || stream === true) {
       res.set({
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
-      });
+      })
     } else {
       res.set({
         'Content-Type': 'application/json',
-      });
+      })
     }
 
-    const messageId = crypto.randomUUID()
+    if (model === "genspark") {
+      const searchResponse = await searchModel(session_id, messages)
+      if (!searchResponse) {
+        return res.status(500).json({ error: '请求失败' })
+      }
+
+      let searchResult = ''
+
+      const reader = searchResponse.body.getReader()
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) {
+          break
+        }
+        const text = new TextDecoder().decode(value)
+
+        let contentArray = [...text.matchAll(/data:.*"}/g)]
+        for (const item of contentArray) {
+          if (!item[0] || !isValidJSON(item[0].replace("data: ", ''))) {
+            console.log("不符合", item[0])
+            continue
+          }
+          let content = JSON.parse(item[0].replace("data: ", ''))
+          if (content.delta) {
+            console.log(content.delta)
+          }
+        }
+
+
+      }
+
+      return
+
+    } else if (imageModels[model]) {
+      // console.log(session_id, messages[messages.length - 1].content, model)
+
+      const imageUrls = await SendImageRequest(session_id, messages[messages.length - 1].content, model)
+      console.log(imageUrls)
+      if (imageUrls.length == 0) {
+        return res.status(500).json({ error: '请求失败' })
+      }
+
+      let imageUrlsContent = ''
+      imageUrls.forEach(item => {
+        imageUrlsContent += `![image](${item})\n`
+      })
+
+      if (stream === "true" || stream === true) {
+
+        res.write(`data: ${JSON.stringify({
+          "id": `chatcmpl-${messageId}`,
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": imageUrlsContent
+              }
+            }
+          ],
+          "created": Math.floor(Date.now() / 1000),
+          "model": models[`${model}`],
+          "object": "chat.completion.chunk"
+        })}\n\n`)
+        res.write('data: [DONE]\n\n')
+        return
+      } else {
+
+        res.json({
+          id: `chatcmpl-${messageId}`,
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model,
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: imageUrlsContent,
+              },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: imageUrlsContent.length,
+          },
+        })
+      }
+
+      return
+
+    } else {
+      response = await makeRequest(session_id, model, messages)
+      if (!response) {
+        return res.status(500).json({ error: '请求失败' })
+      }
+    }
+
     const reader = response.body.getReader()
 
     try {
@@ -216,6 +464,7 @@ app.post('/v1/chat/completions', async (req, res) => {
             if (!item[0] || !isValidJSON(content)) {
               return
             }
+
             content = JSON.parse(content)
 
             if (content.type == 'project_start' && content.id) {
@@ -227,7 +476,6 @@ app.post('/v1/chat/completions', async (req, res) => {
             if (!content || !content.delta) {
               return
             }
-
             res.write(`data: ${JSON.stringify({
               "id": `chatcmpl-${messageId}`,
               "choices": [
@@ -242,14 +490,14 @@ app.post('/v1/chat/completions', async (req, res) => {
               "model": models[`${model}`],
               "object": "chat.completion.chunk"
             })}\n\n`)
-
           })
+
         } else {
           const text = new TextDecoder().decode(value)
           const textContent = [...text.matchAll(/data:.*"}/g)]
 
           textContent.forEach(item => {
-            if (!item[0]) {
+            if (!item[0] || !isValidJSON(item[0].replace("data: ", ''))) {
               return
             }
 
@@ -259,7 +507,7 @@ app.post('/v1/chat/completions', async (req, res) => {
               project_id = content.id
             }
 
-            if (!content || !content.field_value || content.field_name === 'session_state.answer_is_finished' || content.field_name === 'content' || content.field_name === 'session_state' || content.delta || content.type === 'project_field') {
+            if (!content || !content?.field_value || content?.field_name === 'session_state.answer_is_finished' || content?.field_name === 'content' || content?.field_name === 'session_state' || content?.delta || content?.type === 'project_field') {
               return
             }
 
@@ -313,8 +561,33 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 })
 
+app.post(config.apiPath + '/v1/images/generations', async (req, res) => {
+  const { prompt, n = 1, size = "1:1", model = "dall-e-3" } = req.body
+  const authHeader = req.headers['authorization'] || ''
+  let session_id = authHeader.replace('Bearer ', '')
+
+  if (!session_id) {
+    return res.status(401).json({ error: '未提供有效的 session_id 或 apiKey' })
+  }
+
+  if (accountInitStatus) {
+    if (config.apiKey && config.apiKey == session_id) {
+      session_id = AccountManager.getAccount()
+    }
+  }
+  const imageUrls = await SendImageRequest(session_id, prompt, model, "1:1", "auto")
+  res.json({
+    created: Math.floor(Date.now() / 1000),
+    data: imageUrls.map(item => {
+      return {
+        url: item
+      }
+    })
+  })
+})
+
 // 获取 models
-app.get('/v1/models', (req, res) => {
+app.get(config.apiPath + '/v1/models', (req, res) => {
   res.json({
     object: "list",
     data: Object.keys(models).map(model => ({
@@ -335,14 +608,14 @@ app.use((err, req, res, next) => {
   })
 })
 
-app.get('/status', (req, res) => {
+app.get(config.apiPath + '/status', (req, res) => {
   res.json({
     status: true,
     message: 'Genspark2API is running'
   })
 })
 
-app.post('/api/account/add', async (req, res) => {
+app.post(config.apiPath + '/account/add', async (req, res) => {
   const authHeader = req.headers['authorization'] || ''
   let apiKey = authHeader.replace('Bearer ', '')
   if (apiKey != config.apiKey) {
